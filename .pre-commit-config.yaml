@@ -1,0 +1,19 @@
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-fix
+        name: cargo fix
+        description: Run cargo fix to apply automatic fixes before commit
+        entry: cargo fix --allow-dirty --allow-staged
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
+        files: \.rs$
+      - id: cargo-fmt
+        name: cargo fmt
+        description: Run rustfmt on Rust files
+        entry: cargo fmt --all
+        language: system
+        pass_filenames: false
+        stages: [ pre-commit ]
+        files: \.rs$
