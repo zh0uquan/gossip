@@ -15,12 +15,15 @@ pub struct Message<Payload> {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
-enum InitPayload {
-    Init {
-        node_id: String,
-        node_ids: Vec<String>,
-    },
-    InitOk {},
+pub enum InitPayload {
+    Init(Init),
+    InitOk,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Init {
+    pub node_id: String,
+    pub node_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -62,7 +65,7 @@ impl<Payload> Message<Payload> {
 }
 
 pub trait Node<Payload> {
-    fn from_init() -> anyhow::Result<Self>
+    fn from_init(init: Init) -> anyhow::Result<Self>
     where
         Self: Sized;
 
@@ -90,7 +93,7 @@ where
             .context("failed to parse init message")?,
     )?;
 
-    let InitPayload::Init { .. } = init_msg.body.payload else {
+    let InitPayload::Init(init) = init_msg.body.payload.clone() else {
         panic!("first message should be init");
     };
 
@@ -99,7 +102,7 @@ where
     reply_msg.send(&mut stdout).await?;
     tracing::info!("init successful");
 
-    let mut node: N = N::from_init()?;
+    let mut node: N = N::from_init(init)?;
 
     while let Some(input_string) = stdin_lines.next_line().await? {
         tracing::info!("Received: {:?}", input_string);

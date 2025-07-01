@@ -1,4 +1,4 @@
-use gossip::{Message, Node, main_loop};
+use gossip::{Init, Message, Node, main_loop};
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
 use tokio::io::AsyncWriteExt;
@@ -16,7 +16,7 @@ pub struct EchoNode {
 }
 
 impl Node<Payload> for EchoNode {
-    fn from_init() -> anyhow::Result<Self>
+    fn from_init(_init: Init) -> anyhow::Result<Self>
     where
         Self: Sized,
     {
