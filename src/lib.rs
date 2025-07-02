@@ -3,6 +3,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::option::Option;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::task::JoinHandle;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Message<Payload> {
@@ -76,10 +77,12 @@ pub trait Node<Payload> {
 
 pub async fn main_loop<N, P>() -> anyhow::Result<()>
 where
-    P: std::fmt::Debug + DeserializeOwned,
+    P: std::fmt::Debug + DeserializeOwned + Send + 'static + Sync,
     N: Node<P>,
 {
     tracing::info!("starting main loop");
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Message<P>>();
 
     let stdin = tokio::io::stdin();
     let mut stdout = tokio::io::stdout();
@@ -103,12 +106,24 @@ where
     tracing::info!("init successful");
 
     let mut node: N = N::from_init(init)?;
+    let jh: JoinHandle<anyhow::Result<()>> = tokio::task::spawn(async move {
+        while let Some(input_string) = stdin_lines.next_line().await? {
+            tracing::info!("Received: {:?}", input_string);
+            let input =
+                serde_json::from_str(&input_string).context("failed to parse init message")?;
 
-    while let Some(input_string) = stdin_lines.next_line().await? {
-        tracing::info!("Received: {:?}", input_string);
-        let input = serde_json::from_str(&input_string)?;
-        node.step(input, &mut stdout).await?;
+            tx.send(input)?;
+        }
+        Ok(())
+    });
+
+    while let Some(message) = rx.recv().await {
+        node.step(message, &mut stdout).await?;
     }
+
+    jh.await
+        .expect("stdin task panicked")
+        .context("node crashed")?;
 
     Ok(())
 }
