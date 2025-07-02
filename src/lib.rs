@@ -3,6 +3,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::option::Option;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -66,7 +67,7 @@ impl<Payload> Message<Payload> {
 }
 
 pub trait Node<Payload> {
-    fn from_init(init: Init) -> anyhow::Result<Self>
+    fn from_init(init: Init, tx: UnboundedSender<Message<Payload>>) -> anyhow::Result<Self>
     where
         Self: Sized;
 
@@ -105,7 +106,7 @@ where
     reply_msg.send(&mut stdout).await?;
     tracing::info!("init successful");
 
-    let mut node: N = N::from_init(init)?;
+    let mut node: N = N::from_init(init, tx.clone())?;
     let jh: JoinHandle<anyhow::Result<()>> = tokio::task::spawn(async move {
         while let Some(input_string) = stdin_lines.next_line().await? {
             tracing::info!("Received: {:?}", input_string);

@@ -2,6 +2,7 @@ use gossip::{Init, Message, Node, main_loop};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use tokio::io::AsyncWriteExt;
+use tokio::sync::mpsc::UnboundedSender;
 
 struct BroadcastNode {
     node_id: String,
@@ -30,7 +31,7 @@ enum Payload {
 }
 
 impl Node<Payload> for BroadcastNode {
-    fn from_init(init: Init) -> anyhow::Result<Self>
+    fn from_init(init: Init, _tx: UnboundedSender<Message<Payload>>) -> anyhow::Result<Self>
     where
         Self: Sized,
     {
