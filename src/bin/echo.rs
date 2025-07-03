@@ -17,7 +17,7 @@ pub struct EchoNode {
 }
 
 impl Node<Payload> for EchoNode {
-    fn from_init(_init: Init, _tx: UnboundedSender<Message<Payload>>) -> anyhow::Result<Self>
+    async fn from_init(_init: Init, _tx: UnboundedSender<Message<Payload>>) -> anyhow::Result<Self>
     where
         Self: Sized,
     {

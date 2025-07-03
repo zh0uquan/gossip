@@ -22,7 +22,7 @@ fn generate_snowflake_id(timestamp: u64, machine_id: u64, sequence: u64) -> u64 
 }
 
 impl Node<Payload> for UniqueIdNode {
-    fn from_init(init: Init, _tx: UnboundedSender<Message<Payload>>) -> anyhow::Result<Self>
+    async fn from_init(init: Init, _tx: UnboundedSender<Message<Payload>>) -> anyhow::Result<Self>
     where
         Self: Sized,
     {
