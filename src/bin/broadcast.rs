@@ -1,64 +1,68 @@
 use gossip::{Body, Init, Message, Node, main_loop};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::UnboundedSender;
 
 type NodeId = String;
+type Clock = usize;
+type Value = usize;
+
+type MessageId = (NodeId, Clock);
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct VectorClock {
-    pub clock: HashMap<NodeId, usize>,
+    pub clock: HashMap<NodeId, Clock>,
 }
 
 impl VectorClock {
-    pub fn get(&self, node_id: &NodeId) -> usize {
+    pub fn get(&self, node_id: &NodeId) -> Clock {
         *self.clock.get(node_id).unwrap_or(&0)
     }
 
-    pub fn update(&mut self, node_id: &NodeId, clock: usize) {
+    pub fn update(&mut self, node_id: &NodeId, clock: Clock) {
         self.clock
             .entry(node_id.clone())
             .and_modify(|c| *c = (*c).max(clock))
             .or_insert(clock);
     }
 
-    pub fn missing(&self, other: &VectorClock) -> Vec<(NodeId, usize)> {
-        other
-            .clock
-            .iter()
-            .filter_map(|(other_node, other_clock)| {
-                let self_clock = self.get(other_node);
-                if other_clock > &self_clock {
-                    return Some((other_node.clone(), *other_clock));
-                }
-                None
-            })
-            .collect()
+    pub fn missing(&self, other: &VectorClock) -> Vec<MessageId> {
+        let mut missing = Vec::new();
+
+        for (other_node, other_clock) in &other.clock {
+            let self_clock = self.get(other_node);
+            if other_clock > &self_clock {
+                missing.push((other_node.clone(), self_clock + 1));
+            }
+        }
+
+        for (self_node, _) in self.clock.iter() {
+            if !other.clock.contains_key(self_node) {
+                missing.push((self_node.clone(), 1));
+            }
+        }
+
+        missing
     }
 }
 
 #[derive(Clone, Debug, Default)]
 struct State {
     node_id: NodeId,
-    messages: HashMap<MessageId, usize>,
-    message_ids: HashSet<MessageId>,
+    messages: HashMap<MessageId, Value>,
     vector_clock: VectorClock,
     peers: Vec<NodeId>,
     counter: usize,
-    clock: usize,
+    clock: Clock,
 }
 
 impl State {
     pub fn update_message(&mut self, value: usize) -> MessageId {
         self.clock += 1;
-        let message_id = MessageId {
-            node: self.node_id.clone(),
-            counter: self.clock,
-        };
+        let message_id = (self.node_id.clone(), self.clock);
         self.vector_clock.update(&self.node_id, self.clock);
-        self.message_ids.insert(message_id.clone());
         self.messages.insert(message_id.clone(), value);
         message_id
     }
@@ -69,23 +73,17 @@ struct BroadcastNode {
     state: Arc<Mutex<State>>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Hash)]
-pub struct MessageId {
-    pub node: NodeId,
-    pub counter: usize,
-}
-
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 enum Payload {
     Broadcast {
-        message: usize,
+        message: Value,
     },
     BroadcastOk,
     Read,
     ReadOk {
-        messages: Vec<usize>,
+        messages: Vec<Value>,
     },
     Topology {
         topology: HashMap<String, Vec<String>>,
@@ -95,10 +93,10 @@ enum Payload {
         vector_clock: VectorClock,
     },
     GossipRequest {
-        want: Vec<(NodeId, usize)>,
+        want: Vec<MessageId>,
     },
     GossipResponse {
-        entries: Vec<(MessageId, usize)>,
+        entries: Vec<(MessageId, Value)>,
     },
 }
 
@@ -110,6 +108,9 @@ impl Node<Payload> for BroadcastNode {
         let state = Arc::new(Mutex::new(State {
             node_id: init.node_id.clone(),
             peers: init.node_ids,
+            vector_clock: VectorClock {
+                clock: HashMap::from([(init.node_id.clone(), 0)]),
+            },
             ..Default::default()
         }));
 
@@ -122,12 +123,11 @@ impl Node<Payload> for BroadcastNode {
     async fn heartbeat(&self, tx: UnboundedSender<Message<Payload>>) -> anyhow::Result<()> {
         let state = self.state.clone();
         loop {
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
             let mut s = state.lock().await;
-            s.counter += 1;
-            for peer in s.peers.iter() {
+            for (i, peer) in s.peers.iter().enumerate() {
                 let message = Message {
-                    id: Some(s.counter),
+                    id: Some(s.counter + i + 1),
                     src: s.node_id.clone(),
                     dest: peer.clone(),
                     body: Body {
@@ -138,9 +138,10 @@ impl Node<Payload> for BroadcastNode {
                         },
                     },
                 };
-                tracing::info!("Sending Gossip Request to peer {:?}: {:?}", peer, message);
+                tracing::info!("Sending Gossip Digest to peer {:?}: {:?}", peer, message);
                 tx.send(message)?;
             }
+            s.counter += s.peers.len();
         }
     }
 
@@ -182,6 +183,7 @@ impl Node<Payload> for BroadcastNode {
                 tracing::info!("Got new Gossip Digest: {:?}", remote_clock);
                 let want = s.vector_clock.missing(&remote_clock);
                 if !want.is_empty() {
+                    tracing::info!("try to query entries: {:?}", want);
                     reply.body.payload = Payload::GossipRequest { want };
                     tx.send(reply)?;
                 }
@@ -191,28 +193,31 @@ impl Node<Payload> for BroadcastNode {
                     .into_iter()
                     .flat_map(|(node, from)| {
                         let to = s.vector_clock.get(&node);
-                        (from..=to)
-                            .map(|i| MessageId {
-                                node: node.clone(),
-                                counter: i,
-                            })
-                            .collect::<Vec<_>>()
+                        if from <= to {
+                            (from..=to)
+                                .map(|i| (node.clone(), i))
+                                .collect::<Vec<MessageId>>()
+                        } else {
+                            Vec::new()
+                        }
                     })
                     .filter_map(|id| s.messages.get(&id).map(|value| (id, *value)))
                     .collect();
                 reply.body.payload = Payload::GossipResponse { entries };
                 tx.send(reply)?;
             }
-            Payload::GossipResponse { entries } => {
+            Payload::GossipResponse { mut entries } => {
                 tracing::info!("Got new Gossip Response: {:?}", entries);
+                entries.sort_by_key(|(k, _)| (*k).clone());
                 for (id, value) in entries {
-                    let current = s.vector_clock.get(&id.node);
-                    if id.counter > current {
-                        s.vector_clock.update(&id.node, id.counter);
-                        s.message_ids.insert(id.clone());
+                    let (message_node, message_clock) = id.clone();
+                    let clock = s.vector_clock.get(&message_node);
+                    if message_clock > clock {
+                        s.vector_clock.update(&message_node, message_clock);
                         s.messages.insert(id, value);
                     }
                 }
+                tracing::info!("my messages: {:?}", s.messages.values());
             }
             _ => {}
         }
