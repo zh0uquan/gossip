@@ -183,7 +183,7 @@ impl Node<Payload> for BroadcastNode {
                 tracing::info!("Got new Gossip Digest: {:?}", remote_clock);
                 let want = s.vector_clock.missing(&remote_clock);
                 if !want.is_empty() {
-                    tracing::info!("try to query entries: {:?}", want);
+                    tracing::info!("Try to query entries: {:?}", want);
                     reply.body.payload = Payload::GossipRequest { want };
                     tx.send(reply)?;
                 }
@@ -217,7 +217,7 @@ impl Node<Payload> for BroadcastNode {
                         s.messages.insert(id, value);
                     }
                 }
-                tracing::info!("my messages: {:?}", s.messages.values());
+                tracing::info!("After patch, my messages is: {:?}", s.messages.values());
             }
             _ => {}
         }
