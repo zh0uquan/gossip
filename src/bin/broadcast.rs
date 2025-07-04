@@ -1,4 +1,6 @@
 use gossip::{Body, Init, Message, Node, main_loop};
+use rand::seq::SliceRandom;
+use rand::thread_rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -122,26 +124,26 @@ impl Node<Payload> for BroadcastNode {
 
     async fn heartbeat(&self, tx: UnboundedSender<Message<Payload>>) -> anyhow::Result<()> {
         let state = self.state.clone();
+        let mut rng = thread_rng();
         loop {
             tokio::time::sleep(Duration::from_millis(100)).await;
             let mut s = state.lock().await;
-            for (i, peer) in s.peers.iter().enumerate() {
-                let message = Message {
-                    id: Some(s.counter + i + 1),
-                    src: s.node_id.clone(),
-                    dest: peer.clone(),
-                    body: Body {
-                        id: None,
-                        in_reply_to: None,
-                        payload: Payload::GossipDigest {
-                            vector_clock: s.vector_clock.clone(),
-                        },
+            s.counter += 1;
+            let peer = s.peers.choose(&mut rng).unwrap();
+            let message = Message {
+                id: Some(s.counter),
+                src: s.node_id.clone(),
+                dest: peer.clone(),
+                body: Body {
+                    id: None,
+                    in_reply_to: None,
+                    payload: Payload::GossipDigest {
+                        vector_clock: s.vector_clock.clone(),
                     },
-                };
-                tracing::info!("Sending Gossip Digest to peer {:?}: {:?}", peer, message);
-                tx.send(message)?;
-            }
-            s.counter += s.peers.len();
+                },
+            };
+            tracing::info!("Sending Gossip Digest to peer {:?}: {:?}", peer, message);
+            tx.send(message)?;
         }
     }
 
