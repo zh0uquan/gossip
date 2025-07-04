@@ -1,7 +1,6 @@
 use gossip::{Init, Message, Node, main_loop};
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
-use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -17,23 +16,25 @@ pub struct EchoNode {
 }
 
 impl Node<Payload> for EchoNode {
-    async fn from_init(_init: Init, _tx: UnboundedSender<Message<Payload>>) -> anyhow::Result<Self>
+    fn from_init(_init: Init) -> anyhow::Result<Self>
     where
         Self: Sized,
     {
         Ok(Self { id: 1 })
     }
 
-    async fn step<O>(&mut self, input: Message<Payload>, output: &mut O) -> anyhow::Result<()>
-    where
-        O: AsyncWriteExt + Unpin,
-    {
+    async fn step(
+        &mut self,
+        input: Message<Payload>,
+        tx: UnboundedSender<Message<Payload>>,
+    ) -> anyhow::Result<()> {
         let mut reply = input.into_reply(Some(0));
 
         match reply.body.payload {
             Payload::Echo { echo } => {
                 reply.body.payload = Payload::EchoOk { echo };
-                reply.send(output).await?;
+                tracing::info!("sending reply: {:?}", reply);
+                tx.send(reply)?;
             }
             Payload::EchoOk { .. } => {}
         }
@@ -51,6 +52,7 @@ impl Display for EchoNode {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
+        .with_ansi(false)
         .init();
     main_loop::<EchoNode, _>().await
 }

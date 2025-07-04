@@ -1,7 +1,6 @@
-use gossip::{Init, Message, Node, main_loop};
+use gossip::{Init, Message, Node, generate_snowflake_id, main_loop};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -17,12 +16,8 @@ struct UniqueIdNode {
     counter: usize,
 }
 
-fn generate_snowflake_id(timestamp: u64, machine_id: u64, sequence: u64) -> u64 {
-    (timestamp << 22) | (machine_id << 12) | sequence
-}
-
 impl Node<Payload> for UniqueIdNode {
-    async fn from_init(init: Init, _tx: UnboundedSender<Message<Payload>>) -> anyhow::Result<Self>
+    fn from_init(init: Init) -> anyhow::Result<Self>
     where
         Self: Sized,
     {
@@ -37,10 +32,11 @@ impl Node<Payload> for UniqueIdNode {
         })
     }
 
-    async fn step<O>(&mut self, input: Message<Payload>, output: &mut O) -> anyhow::Result<()>
-    where
-        O: AsyncWriteExt + Unpin,
-    {
+    async fn step(
+        &mut self,
+        input: Message<Payload>,
+        tx: UnboundedSender<Message<Payload>>,
+    ) -> anyhow::Result<()> {
         self.counter += 1;
         let mut reply = input.into_reply(Some(self.counter));
 
@@ -52,7 +48,7 @@ impl Node<Payload> for UniqueIdNode {
                     self.counter as u64,
                 );
                 reply.body.payload = Payload::GenerateOk { id };
-                reply.send(output).await?
+                tx.send(reply)?;
             }
             Payload::GenerateOk { .. } => {}
         }
@@ -64,6 +60,7 @@ impl Node<Payload> for UniqueIdNode {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
+        .with_ansi(false)
         .init();
     main_loop::<UniqueIdNode, _>().await
 }

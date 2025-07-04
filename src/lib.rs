@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 use std::option::Option;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::task::JoinHandle;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Message<Payload> {
@@ -40,7 +39,7 @@ pub struct Body<Payload> {
 impl<Payload> Message<Payload> {
     pub fn into_reply(self, id: Option<usize>) -> Message<Payload> {
         Self {
-            id: self.id,
+            id,
             src: self.dest,
             dest: self.src,
             body: Body {
@@ -67,18 +66,27 @@ impl<Payload> Message<Payload> {
 }
 
 pub trait Node<Payload> {
-    async fn from_init(init: Init, tx: UnboundedSender<Message<Payload>>) -> anyhow::Result<Self>
+    fn from_init(init: Init) -> anyhow::Result<Self>
     where
         Self: Sized;
 
-    async fn step<O>(&mut self, input: Message<Payload>, output: &mut O) -> anyhow::Result<()>
-    where
-        O: AsyncWriteExt + Unpin;
+    async fn heartbeat(&self, _tx: UnboundedSender<Message<Payload>>) -> anyhow::Result<()> {
+        loop {
+            tracing::info!("heartbeat loop");
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
+
+    async fn step(
+        &mut self,
+        input: Message<Payload>,
+        tx: UnboundedSender<Message<Payload>>,
+    ) -> anyhow::Result<()>;
 }
 
 pub async fn main_loop<N, P>() -> anyhow::Result<()>
 where
-    P: std::fmt::Debug + DeserializeOwned + Send + 'static + Sync,
+    P: std::fmt::Debug + DeserializeOwned + Send + 'static + Sync + Serialize,
     N: Node<P>,
 {
     tracing::info!("starting main loop");
@@ -106,25 +114,28 @@ where
     reply_msg.send(&mut stdout).await?;
     tracing::info!("init successful");
 
-    let mut node: N = N::from_init(init, tx.clone()).await?;
-    let jh: JoinHandle<anyhow::Result<()>> = tokio::task::spawn(async move {
-        while let Some(input_string) = stdin_lines.next_line().await? {
-            tracing::info!("Received: {:?}", input_string);
-            let input =
-                serde_json::from_str(&input_string).context("failed to parse init message")?;
+    let mut node: N = N::from_init(init)?;
 
-            tx.send(input)?;
+    loop {
+        tokio::select! {
+            maybe_message = rx.recv() => {
+                if let Some(message) = maybe_message {
+                    message.send(&mut stdout).await?;
+                }
+            },
+            maybe_line = stdin_lines.next_line() => {
+                if let Some(line) = maybe_line? {
+                    let input: Message<P> = serde_json::from_str(&line).context("failed to parse init message")?;
+                    node.step(input, tx.clone()).await?;
+                }
+            },
+            _ = node.heartbeat(tx.clone()) => {
+                anyhow::bail!("heart beat loop exited");
+            }
         }
-        Ok(())
-    });
-
-    while let Some(message) = rx.recv().await {
-        node.step(message, &mut stdout).await?;
     }
+}
 
-    jh.await
-        .expect("stdin task panicked")
-        .context("node crashed")?;
-
-    Ok(())
+pub fn generate_snowflake_id(timestamp: u64, machine_id: u64, sequence: u64) -> u64 {
+    (timestamp << 22) | (machine_id << 12) | sequence
 }

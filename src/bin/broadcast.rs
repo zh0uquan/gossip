@@ -1,35 +1,78 @@
-use gossip::{Init, Message, Node, main_loop, Body};
+use gossip::{Body, Init, Message, Node, main_loop};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
-use rand::prelude::SliceRandom;
-use tokio::io::AsyncWriteExt;
-use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Mutex;
-use tokio::task::JoinHandle;
+use tokio::sync::mpsc::UnboundedSender;
 
 type NodeId = String;
-type VectorClock = HashMap<NodeId, usize>;
-
-#[derive(Clone, Debug)]
-struct State {
-    node_id: NodeId,
-    messages: Vec<usize>,
-    vector_clock: VectorClock,
-    peers: Vec<NodeId>,
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct VectorClock {
+    pub clock: HashMap<NodeId, usize>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct Patch {
-    updates: Vec<usize>,
-    clock: VectorClock,
+impl VectorClock {
+    pub fn get(&self, node_id: &NodeId) -> usize {
+        *self.clock.get(node_id).unwrap_or(&0)
+    }
+
+    pub fn update(&mut self, node_id: &NodeId, clock: usize) {
+        self.clock
+            .entry(node_id.clone())
+            .and_modify(|c| *c = (*c).max(clock))
+            .or_insert(clock);
+    }
+
+    pub fn missing(&self, other: &VectorClock) -> Vec<(NodeId, usize)> {
+        other
+            .clock
+            .iter()
+            .filter_map(|(other_node, other_clock)| {
+                let self_clock = self.get(other_node);
+                if other_clock > &self_clock {
+                    return Some((other_node.clone(), *other_clock));
+                }
+                None
+            })
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct State {
+    node_id: NodeId,
+    messages: HashMap<MessageId, usize>,
+    message_ids: HashSet<MessageId>,
+    vector_clock: VectorClock,
+    peers: Vec<NodeId>,
+    counter: usize,
+    clock: usize,
+}
+
+impl State {
+    pub fn update_message(&mut self, value: usize) -> MessageId {
+        self.clock += 1;
+        let message_id = MessageId {
+            node: self.node_id.clone(),
+            counter: self.clock,
+        };
+        self.vector_clock.update(&self.node_id, self.clock);
+        self.message_ids.insert(message_id.clone());
+        self.messages.insert(message_id.clone(), value);
+        message_id
+    }
 }
 
 struct BroadcastNode {
     node_id: NodeId,
     state: Arc<Mutex<State>>,
-    counter: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Hash)]
+pub struct MessageId {
+    pub node: NodeId,
+    pub counter: usize,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -48,138 +91,134 @@ enum Payload {
         topology: HashMap<String, Vec<String>>,
     },
     TopologyOk,
-    GossipDigest { vector_clock: VectorClock },
-    GossipRequest { missing: Vec<NodeId> },
-    GossipResponse { patch: Patch }
+    GossipDigest {
+        vector_clock: VectorClock,
+    },
+    GossipRequest {
+        want: Vec<(NodeId, usize)>,
+    },
+    GossipResponse {
+        entries: Vec<(MessageId, usize)>,
+    },
 }
 
 impl Node<Payload> for BroadcastNode {
-    async fn from_init(init: Init, tx: UnboundedSender<Message<Payload>>) -> anyhow::Result<Self>
+    fn from_init(init: Init) -> anyhow::Result<Self>
     where
         Self: Sized,
     {
-        let state = Arc::new(Mutex::new(
-            State {
-                node_id: init.node_id.clone(),
-                messages: vec![],
-                vector_clock: Default::default(),
-                peers: init.node_ids,
-            }
-        ));
-
-        let state_clone = state.clone();
-        let handler: JoinHandle<anyhow::Result<()>> = tokio::task::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_millis(10000)).await;
-                tracing::info!("Sending Gossip Digest");
-
-                let s = state.lock().await;
-                for peer in s.peers.iter() {
-                    tx.send(Message {
-                        id: None,
-                        src: s.node_id.clone(),
-                        dest: peer.clone(),
-                        body: Body {
-                            id: None,
-                            in_reply_to: None,
-                            payload: Payload::GossipDigest { vector_clock: s.vector_clock.clone() },
-                        },
-                    })?;
-                }
-            }
-        });
-
-        handler.await
-            .expect("background task failed")?;
+        let state = Arc::new(Mutex::new(State {
+            node_id: init.node_id.clone(),
+            peers: init.node_ids,
+            ..Default::default()
+        }));
 
         Ok(Self {
             node_id: init.node_id.clone(),
-            state: state_clone,
-            counter: 0,
+            state,
         })
     }
 
-    async fn step<O>(&mut self, input: Message<Payload>, output: &mut O) -> anyhow::Result<()>
-    where
-        O: AsyncWriteExt + Unpin,
-    {
-        let counter = self.counter + 1;
-        let mut s = self.state.lock().await;
-        let mut reply = input.into_reply(Some(counter));
+    async fn heartbeat(&self, tx: UnboundedSender<Message<Payload>>) -> anyhow::Result<()> {
+        let state = self.state.clone();
+        loop {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let mut s = state.lock().await;
+            s.counter += 1;
+            for peer in s.peers.iter() {
+                let message = Message {
+                    id: Some(s.counter),
+                    src: s.node_id.clone(),
+                    dest: peer.clone(),
+                    body: Body {
+                        id: None,
+                        in_reply_to: None,
+                        payload: Payload::GossipDigest {
+                            vector_clock: s.vector_clock.clone(),
+                        },
+                    },
+                };
+                tracing::info!("Sending Gossip Request to peer {:?}: {:?}", peer, message);
+                tx.send(message)?;
+            }
+        }
+    }
 
+    async fn step(
+        &mut self,
+        input: Message<Payload>,
+        tx: UnboundedSender<Message<Payload>>,
+    ) -> anyhow::Result<()> {
+        let mut s = self.state.lock().await;
+        s.counter += 1;
+        let mut reply = input.into_reply(Some(s.counter));
         match reply.body.payload {
             Payload::Broadcast { message } => {
-                *s.vector_clock.entry(self.node_id.clone()).or_default() += 1;
-                s.messages.push(message);
-                tracing::info!("Got a message: {:?} with new clock: {:?}" , message, s.vector_clock);
+                s.update_message(message);
+                tracing::info!(
+                    "Got a message: {:?} with new clock: {:?}",
+                    message,
+                    s.vector_clock
+                );
                 reply.body.payload = Payload::BroadcastOk;
-                reply.send(output).await?;
+                tx.send(reply)?;
             }
             Payload::Read => {
                 reply.body.payload = Payload::ReadOk {
-                    messages: s.messages.iter().cloned().collect(),
+                    messages: s.messages.values().cloned().collect(),
                 };
-                reply.send(output).await?;
+                tx.send(reply)?;
             }
             Payload::Topology { mut topology } => {
                 tracing::info!("Got New Topology: {:?}", topology);
                 s.peers = topology.entry(self.node_id.clone()).or_default().clone();
-                s.vector_clock = s.vector_clock.clone()
-                    .into_iter()
-                    .filter(|(n, _)| s.peers.contains(n))
-                    .collect();              
                 reply.body.payload = Payload::TopologyOk;
-                reply.send(output).await?;
+                tx.send(reply)?;
             }
             Payload::TopologyOk => {}
-            Payload::GossipDigest { vector_clock: clock } => {
-                let missing = clock_compare(&clock, &s.vector_clock);
-                if !missing.is_empty() {
-                    reply.body.payload = Payload::GossipRequest { missing };
-                    reply.send(output).await?;
+            Payload::GossipDigest {
+                vector_clock: remote_clock,
+            } => {
+                tracing::info!("Got new Gossip Digest: {:?}", remote_clock);
+                let want = s.vector_clock.missing(&remote_clock);
+                if !want.is_empty() {
+                    reply.body.payload = Payload::GossipRequest { want };
+                    tx.send(reply)?;
                 }
             }
-            Payload::GossipRequest { .. } => {
-                let patch = Patch {
-                    updates: s.messages.clone(),
-                    clock: s.vector_clock.clone(),
-                };
-                reply.body.payload = Payload::GossipResponse { patch };
-                reply.send(output).await?;
-            },
-            Payload::GossipResponse { patch } => {
-                merge_patch(&mut s, &patch);        
+            Payload::GossipRequest { want } => {
+                let entries = want
+                    .into_iter()
+                    .flat_map(|(node, from)| {
+                        let to = s.vector_clock.get(&node);
+                        (from..=to)
+                            .map(|i| MessageId {
+                                node: node.clone(),
+                                counter: i,
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .filter_map(|id| s.messages.get(&id).map(|value| (id, *value)))
+                    .collect();
+                reply.body.payload = Payload::GossipResponse { entries };
+                tx.send(reply)?;
+            }
+            Payload::GossipResponse { entries } => {
+                tracing::info!("Got new Gossip Response: {:?}", entries);
+                for (id, value) in entries {
+                    let current = s.vector_clock.get(&id.node);
+                    if id.counter > current {
+                        s.vector_clock.update(&id.node, id.counter);
+                        s.message_ids.insert(id.clone());
+                        s.messages.insert(id, value);
+                    }
+                }
             }
             _ => {}
         }
 
         Ok(())
     }
-}
-
-fn merge_patch(local: &mut State, patch: &Patch) {
-    let mut applied = false;
-
-    for (node, patch_version) in &patch.clock {
-        let local_version = local.vector_clock.get(node).cloned().unwrap_or(0);
-        if *patch_version > local_version {
-            local.vector_clock.insert(node.clone(), *patch_version);
-            applied = true;
-        }
-    }
-    if applied {
-        local.messages.extend(patch.updates.iter().cloned());
-        // local.messages.sort();
-        // local.messages.dedup();
-    }
-}
-
-
-fn clock_compare(incoming: &VectorClock, local: &VectorClock) -> Vec<NodeId> {
-    incoming.iter()
-        .filter(|(node, clock)| local.get(*node).unwrap_or(&0) < clock)
-        .map(|(n, _)| n.clone())
-        .collect()
 }
 
 #[tokio::main]
