@@ -126,7 +126,7 @@ impl Node<Payload> for BroadcastNode {
         let state = self.state.clone();
         let mut rng = thread_rng();
         loop {
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(150)).await;
             let mut s = state.lock().await;
             s.counter += 1;
             let peer = s.peers.choose(&mut rng).unwrap();
