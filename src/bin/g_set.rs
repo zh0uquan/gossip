@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashSet};
 use gossip::{Init, Message, Node, main_loop, Body};
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
