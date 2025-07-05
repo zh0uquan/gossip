@@ -1,42 +1,38 @@
-use std::collections::{HashSet};
-use gossip::{Init, Message, Node, main_loop, Body};
+use gossip::{Body, Init, Message, Node, main_loop};
 use serde::{Deserialize, Serialize};
-use std::fmt::{Display, Formatter};
+use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use std::time::Duration;
+use tokio::sync::Mutex;
 use tokio::sync::mpsc::UnboundedSender;
 
 type Value = usize;
+type NodeId = String;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 enum Payload {
-    Add { element: Value },
+    Add { delta: Value },
     AddOk,
-    Replicate {
-        g_set: HashSet<Value>,
-    },
+    Replicate { values: HashMap<NodeId, Vec<Value>> },
     Read,
-    ReadOk {
-        value: HashSet<Value>,
-    },
+    ReadOk { value: Value },
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct State {
     counter: usize,
-    g_set: HashSet<Value>
+    g_vec: HashMap<NodeId, Vec<Value>>,
 }
 
-pub struct GSetNode {
+pub struct GCounterNode {
     node_id: String,
     node_ids: Vec<String>,
     state: Arc<Mutex<State>>,
 }
 
-impl Node<Payload> for GSetNode {
+impl Node<Payload> for GCounterNode {
     fn from_init(init: Init) -> anyhow::Result<Self>
     where
         Self: Sized,
@@ -44,7 +40,7 @@ impl Node<Payload> for GSetNode {
         Ok(Self {
             node_id: init.node_id,
             node_ids: init.node_ids,
-            state: Default::default()
+            state: Default::default(),
         })
     }
 
@@ -63,9 +59,9 @@ impl Node<Payload> for GSetNode {
                         id: None,
                         in_reply_to: None,
                         payload: Payload::Replicate {
-                            g_set: s.g_set.clone()
+                            values: s.g_vec.clone(),
                         },
-                    }
+                    },
                 };
                 tracing::info!("Sending replicate to {}, message: {:?}", peer, message);
                 tx.send(message)?;
@@ -81,18 +77,30 @@ impl Node<Payload> for GSetNode {
         let mut s = self.state.lock().await;
         let mut reply = input.into_reply(Some(0));
         match reply.body.payload {
-            Payload::Add { element } => {
-                tracing::info!("Got new message: {:?}", element);
+            Payload::Add { delta } => {
+                tracing::info!("Got new message: {:?}", delta);
                 reply.body.payload = Payload::AddOk;
-                s.g_set.insert(element);
+                s.g_vec.entry(self.node_id.clone()).or_default().push(delta);
                 tx.send(reply)?;
             }
-            Payload::Replicate { g_set } => {
-                tracing::info!("Replicated message: {:?}", g_set);
-                s.g_set = g_set.union(&s.g_set).cloned().collect();
+            Payload::Replicate { values: incoming } => {
+                tracing::info!("Replicated message: {:?}", incoming);
+                for (key, new_vec) in incoming.iter() {
+                    s.g_vec
+                        .entry(key.clone())
+                        .and_modify(|existing_vec| {
+                            if new_vec.len() > existing_vec.len() {
+                                *existing_vec = new_vec.clone();
+                            }
+                        })
+                        .or_insert(new_vec.clone());
+                }
             }
             Payload::Read => {
-                reply.body.payload = Payload::ReadOk { value: s.g_set.clone() };
+                tracing::info!("Read message: {:?}", s.g_vec);
+                reply.body.payload = Payload::ReadOk {
+                    value: s.g_vec.values().flatten().sum::<Value>(),
+                };
                 tx.send(reply)?;
             }
             _ => {}
@@ -101,12 +109,11 @@ impl Node<Payload> for GSetNode {
     }
 }
 
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_ansi(false)
         .init();
-    main_loop::<GSetNode, _>().await
+    main_loop::<GCounterNode, _>().await
 }
