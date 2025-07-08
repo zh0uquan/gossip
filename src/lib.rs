@@ -125,7 +125,6 @@ where
             },
             maybe_line = stdin_lines.next_line() => {
                 if let Some(line) = maybe_line? {
-                    tracing::info!("read from stdin {:?}", line);
                     let input: Message<P> = serde_json::from_str(&line).context("failed to parse init message")?;
                     node.step(input, tx.clone()).await?;
                 }

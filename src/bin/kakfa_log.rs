@@ -51,13 +51,17 @@ pub struct MemLog {
 impl MemLog {
     pub fn append(&mut self, value: Value) -> Offset {
         self.pending.push_back(value);
-        self.committed.len() + self.pending.len()
+        self.committed.len() + self.pending.len() - 1
     }
 
     pub fn commit(&mut self, offset: Offset) -> anyhow::Result<()> {
-        let to_commit = offset.saturating_sub(self.committed.len());
-
-        for _ in 0..=to_commit {
+        let commited_len = self.committed.len();
+        if offset > commited_len + self.pending.len() {
+            return Ok(());
+        }
+        let to_commit = offset - commited_len;
+        tracing::info!("offset {offset} committed {to_commit}");
+        for _ in 0..to_commit {
             let new_commit = self
                 .pending
                 .pop_front()
@@ -73,16 +77,34 @@ impl MemLog {
     }
 
     pub fn poll(&self, offset: Offset) -> Vec<[usize; 2]> {
-        if offset >= self.committed.len() {
+        let committed_len = self.committed.len();
+        let total_len = committed_len + self.pending.len();
+
+        if offset >= total_len {
             return vec![];
         }
-        let result: Vec<[usize; 2]> = self.committed[offset..]
-            .iter()
-            .copied()
+        // Case 1: offset only in `pending`
+        if offset >= committed_len {
+            let start = offset - committed_len;
+            return self
+                .pending
+                .iter()
+                .skip(start)
+                .cloned()
+                .enumerate()
+                .map(|(i, v)| [i + offset, v])
+                .collect();
+        }
+
+        // Case 2: offset in `committed` and may overlap into `pending`
+        let committed_iter = self.committed[offset..].iter().cloned();
+        let pending_iter = self.pending.iter().cloned();
+
+        committed_iter
+            .chain(pending_iter)
             .enumerate()
-            .map(|(i, v)| [i, v])
-            .collect();
-        result
+            .map(|(i, v)| [i + offset, v])
+            .collect()
     }
 }
 
@@ -166,14 +188,16 @@ impl Node<Payload> for KafkaLogNode {
         let mut reply = input.into_reply(Some(0));
         match reply.body.payload {
             Payload::Send { key, msg } => {
-                tracing::info!("Got new message: {:?} {:?}", key, msg);
+                tracing::info_span!("Got new message: {:?} {:?}", key, msg);
                 let offset = s.log_store.append(key, msg);
+                tracing::info_span!("Sending offset back {:?}", offset);
                 reply.body.payload = Payload::SendOk { offset };
                 tx.send(reply)?;
             }
             Payload::Poll { offsets } => {
                 tracing::info!("Poll offsets: {:?}", offsets);
                 let offsets = s.log_store.poll(offsets);
+                tracing::info!("Poll results ves: {:?}", offsets);
                 reply.body.payload = Payload::PollOk { msgs: offsets };
                 tx.send(reply)?;
             }
