@@ -115,5 +115,5 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .with_ansi(false)
         .init();
-    main_loop::<GCounterNode, _>().await
+    main_loop::<GCounterNode, _, ()>().await
 }

@@ -54,5 +54,5 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .with_ansi(false)
         .init();
-    main_loop::<EchoNode, _>().await
+    main_loop::<EchoNode, _, ()>().await
 }

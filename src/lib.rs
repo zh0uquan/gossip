@@ -1,8 +1,12 @@
 use anyhow::Context;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fmt::Debug;
 use std::option::Option;
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::Mutex;
 use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -70,6 +74,13 @@ pub trait Node<Payload> {
     where
         Self: Sized;
 
+    async fn attach_rpc_service<RpcPayload>(
+        &mut self,
+        _rpc_service: RpcService<RpcPayload>,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     async fn heartbeat(&self, _tx: UnboundedSender<Message<Payload>>) -> anyhow::Result<()> {
         loop {
             tracing::info!("heartbeat loop");
@@ -84,14 +95,59 @@ pub trait Node<Payload> {
     ) -> anyhow::Result<()>;
 }
 
-pub async fn main_loop<N, P>() -> anyhow::Result<()>
+#[derive(Debug)]
+pub struct RpcService<RpcPayload> {
+    inter: Arc<Mutex<Inter<RpcPayload>>>,
+}
+
+#[derive(Debug)]
+pub struct Inter<RpcPayload> {
+    senders: HashMap<usize, tokio::sync::oneshot::Sender<Message<RpcPayload>>>,
+    rpc_tx: UnboundedSender<Message<RpcPayload>>,
+}
+
+impl<RpcPayload> RpcService<RpcPayload>
 where
-    P: std::fmt::Debug + DeserializeOwned + Send + 'static + Sync + Serialize,
+    RpcPayload: Debug + DeserializeOwned + Send + 'static + Sync,
+{
+    fn new(inter: Arc<Mutex<Inter<RpcPayload>>>) -> Self {
+        Self { inter }
+    }
+
+    async fn register_sender(
+        &self,
+        id: usize,
+        tx: tokio::sync::oneshot::Sender<Message<RpcPayload>>,
+    ) {
+        let mut inter = self.inter.lock().await;
+        inter.senders.insert(id, tx);
+    }
+
+    pub async fn rpc(&self, message: Message<RpcPayload>) -> anyhow::Result<Message<RpcPayload>> {
+        let (tx, rx) = tokio::sync::oneshot::channel::<Message<RpcPayload>>();
+
+        let inter = self.inter.lock().await;
+        let message_id = message.id.expect("rpc msg id must be present");
+
+        inter.rpc_tx.send(message)?;
+
+        self.register_sender(message_id, tx).await;
+
+        rx.await
+            .map_err(|_| anyhow::anyhow!("response sender dropped"))
+    }
+}
+
+pub async fn main_loop<N, P, R>() -> anyhow::Result<()>
+where
+    R: Debug + DeserializeOwned + Send + 'static + Sync + Serialize,
+    P: Debug + DeserializeOwned + Send + 'static + Sync + Serialize,
     N: Node<P>,
 {
     tracing::info!("starting main loop");
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Message<P>>();
+    let (rpc_tx, mut rpc_rx) = tokio::sync::mpsc::unbounded_channel::<Message<R>>();
 
     let stdin = tokio::io::stdin();
     let mut stdout = tokio::io::stdout();
@@ -114,19 +170,47 @@ where
     reply_msg.send(&mut stdout).await?;
     tracing::info!("init successful");
 
+    let inter = Arc::new(Mutex::new(Inter {
+        senders: Default::default(),
+        rpc_tx: rpc_tx.clone(),
+    }));
+    let rpc_service = RpcService::new(inter.clone());
+
     let mut node: N = N::from_init(init)?;
+    node.attach_rpc_service(rpc_service).await?;
 
     loop {
+        let inter = inter.clone();
         tokio::select! {
             maybe_message = rx.recv() => {
                 if let Some(message) = maybe_message {
                     message.send(&mut stdout).await?;
                 }
             },
+            rpc_message = rpc_rx.recv() => {
+                if let Some(message) = rpc_message {
+                    message.send(&mut stdout).await?;
+                }
+            },
             maybe_line = stdin_lines.next_line() => {
                 if let Some(line) = maybe_line? {
-                    let input: Message<P> = serde_json::from_str(&line).context("failed to parse init message")?;
-                    node.step(input, tx.clone()).await?;
+                    if let Ok(input) = serde_json::from_str::<Message<P>>(&line) {
+                        node.step(input, tx.clone()).await?;
+                    }
+
+                    if let Ok(rpc) = serde_json::from_str::<Message<R>>(&line) {
+                        match rpc.body.in_reply_to {
+                            None => {
+                                tracing::error!("rpc message got no reply id");
+                                continue;
+                            }
+                            Some(id) => {
+                                if let Some(sender) = inter.lock().await.senders.remove(&id) {
+                                    sender.send(rpc).expect("failed to send message");
+                                }
+                            }
+                        }
+                    }
                 }
             },
             _ = node.heartbeat(tx.clone()) => {

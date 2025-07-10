@@ -1,5 +1,5 @@
 use anyhow::Context;
-use gossip::{Init, Message, Node, main_loop};
+use gossip::{Init, Inter, Message, Node, main_loop};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -40,6 +40,15 @@ enum Payload {
     ListCommittedOffsetsOk {
         offsets: HashMap<LogId, Offset>,
     },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type")]
+#[serde(rename_all = "snake_case")]
+enum RpcPayload {
+    Read,
+    Write,
+    Cas,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -108,9 +117,24 @@ impl MemLog {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
+struct RpcStore {
+    inter: Arc<Mutex<Inter<RpcPayload>>>,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct LogStore {
-    logs: HashMap<LogId, MemLog>,
+    logs: HashMap<LogId, RpcStore>,
+}
+
+impl RpcStore {
+    pub fn append(&mut self, value: Value) -> Offset {}
+
+    pub fn commit(&mut self, offset: Offset) -> Offset {}
+
+    pub fn get_committed_offset(&self) -> Offset {}
+
+    pub fn poll(&mut self, offset: Offset) -> Vec<[usize; 2]> {}
 }
 
 impl LogStore {
@@ -225,5 +249,5 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .with_ansi(false)
         .init();
-    main_loop::<KafkaLogNode, _>().await
+    main_loop::<KafkaLogNode, _, ()>().await
 }
