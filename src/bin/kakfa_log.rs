@@ -1,5 +1,5 @@
 use anyhow::Context;
-use gossip::{Init, Inter, Message, Node, main_loop};
+use gossip::{Init, Inter, Message, Node, main_loop, RpcService};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -40,15 +40,6 @@ enum Payload {
     ListCommittedOffsetsOk {
         offsets: HashMap<LogId, Offset>,
     },
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "type")]
-#[serde(rename_all = "snake_case")]
-enum RpcPayload {
-    Read,
-    Write,
-    Cas,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -117,26 +108,11 @@ impl MemLog {
     }
 }
 
-#[derive(Debug, Clone)]
-struct RpcStore {
-    inter: Arc<Mutex<Inter<RpcPayload>>>,
-}
 
 #[derive(Debug, Clone, Default)]
 pub struct LogStore {
-    logs: HashMap<LogId, RpcStore>,
+    logs: HashMap<LogId, MemLog>,
 }
-
-impl RpcStore {
-    pub fn append(&mut self, value: Value) -> Offset {}
-
-    pub fn commit(&mut self, offset: Offset) -> Offset {}
-
-    pub fn get_committed_offset(&self) -> Offset {}
-
-    pub fn poll(&mut self, offset: Offset) -> Vec<[usize; 2]> {}
-}
-
 impl LogStore {
     pub fn poll(&self, offsets: HashMap<LogId, Offset>) -> HashMap<LogId, Vec<[usize; 2]>> {
         offsets
@@ -184,18 +160,18 @@ pub struct KafkaLogNode {
     state: Arc<Mutex<State>>,
 }
 
-impl Node<Payload> for KafkaLogNode {
-    fn from_init(init: Init) -> anyhow::Result<Self>
+impl Node<Payload, ()> for KafkaLogNode {
+    fn from_init(init: Init, rpc_service: RpcService<()>) -> anyhow::Result<Self>
     where
         Self: Sized,
     {
         Ok(Self {
             node_id: init.node_id,
             node_ids: init.node_ids,
-            state: Default::default(),
+            state: Default::default()
         })
     }
-
+    
     async fn heartbeat(&self, _tx: UnboundedSender<Message<Payload>>) -> anyhow::Result<()> {
         loop {
             tokio::time::sleep(Duration::from_secs(1000)).await;

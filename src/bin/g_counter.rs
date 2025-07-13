@@ -1,4 +1,4 @@
-use gossip::{Body, Init, Message, Node, main_loop};
+use gossip::{Body, Init, Message, Node, main_loop, RpcService};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -32,8 +32,8 @@ pub struct GCounterNode {
     state: Arc<Mutex<State>>,
 }
 
-impl Node<Payload> for GCounterNode {
-    fn from_init(init: Init) -> anyhow::Result<Self>
+impl Node<Payload, ()> for GCounterNode {
+    fn from_init(init: Init, _rpc_service: RpcService<()>) -> anyhow::Result<Self>
     where
         Self: Sized,
     {

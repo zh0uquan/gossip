@@ -1,4 +1,4 @@
-use gossip::{Init, Message, Node, generate_snowflake_id, main_loop};
+use gossip::{Init, Message, Node, generate_snowflake_id, main_loop, RpcService};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc::UnboundedSender;
@@ -16,8 +16,8 @@ struct UniqueIdNode {
     counter: usize,
 }
 
-impl Node<Payload> for UniqueIdNode {
-    fn from_init(init: Init) -> anyhow::Result<Self>
+impl Node<Payload, ()> for UniqueIdNode {
+    fn from_init(init: Init, _rpc_service: RpcService<()>) -> anyhow::Result<Self>
     where
         Self: Sized,
     {

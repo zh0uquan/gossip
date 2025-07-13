@@ -1,4 +1,4 @@
-use gossip::{Init, Message, Node, main_loop};
+use gossip::{Init, Message, Node, main_loop, RpcService};
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
 use tokio::sync::mpsc::UnboundedSender;
@@ -15,8 +15,8 @@ pub struct EchoNode {
     id: usize,
 }
 
-impl Node<Payload> for EchoNode {
-    fn from_init(_init: Init) -> anyhow::Result<Self>
+impl Node<Payload, ()> for EchoNode {
+    fn from_init(_init: Init, _rpc_service: RpcService<()>) -> anyhow::Result<Self>
     where
         Self: Sized,
     {

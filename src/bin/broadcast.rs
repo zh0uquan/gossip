@@ -1,4 +1,4 @@
-use gossip::{Body, Init, Message, Node, main_loop};
+use gossip::{Body, Init, Message, Node, main_loop, RpcService};
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use serde::{Deserialize, Serialize};
@@ -102,8 +102,8 @@ enum Payload {
     },
 }
 
-impl Node<Payload> for BroadcastNode {
-    fn from_init(init: Init) -> anyhow::Result<Self>
+impl Node<Payload, ()> for BroadcastNode {
+    fn from_init(init: Init, _rpc_service: RpcService<()>) -> anyhow::Result<Self>
     where
         Self: Sized,
     {

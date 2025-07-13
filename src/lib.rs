@@ -69,17 +69,10 @@ impl<Payload> Message<Payload> {
     }
 }
 
-pub trait Node<Payload> {
-    fn from_init(init: Init) -> anyhow::Result<Self>
+pub trait Node<Payload, RpcPayload> {
+    fn from_init(init: Init, rpc_service: RpcService<RpcPayload>) -> anyhow::Result<Self>
     where
         Self: Sized;
-
-    async fn attach_rpc_service<RpcPayload>(
-        &mut self,
-        _rpc_service: RpcService<RpcPayload>,
-    ) -> anyhow::Result<()> {
-        Ok(())
-    }
 
     async fn heartbeat(&self, _tx: UnboundedSender<Message<Payload>>) -> anyhow::Result<()> {
         loop {
@@ -142,7 +135,7 @@ pub async fn main_loop<N, P, R>() -> anyhow::Result<()>
 where
     R: Debug + DeserializeOwned + Send + 'static + Sync + Serialize,
     P: Debug + DeserializeOwned + Send + 'static + Sync + Serialize,
-    N: Node<P>,
+    N: Node<P, R>,
 {
     tracing::info!("starting main loop");
 
@@ -176,8 +169,7 @@ where
     }));
     let rpc_service = RpcService::new(inter.clone());
 
-    let mut node: N = N::from_init(init)?;
-    node.attach_rpc_service(rpc_service).await?;
+    let mut node: N = N::from_init(init, rpc_service)?;
 
     loop {
         let inter = inter.clone();
