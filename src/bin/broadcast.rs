@@ -1,4 +1,5 @@
-use gossip::{Body, Init, Message, Node, main_loop, RpcService};
+use async_trait::async_trait;
+use gossip::{Body, Init, Message, Node, RpcService, main_loop};
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use serde::{Deserialize, Serialize};
@@ -70,8 +71,8 @@ impl State {
     }
 }
 
+#[derive(Clone)]
 struct BroadcastNode {
-    node_id: NodeId,
     state: Arc<Mutex<State>>,
 }
 
@@ -102,6 +103,7 @@ enum Payload {
     },
 }
 
+#[async_trait]
 impl Node<Payload, ()> for BroadcastNode {
     fn from_init(init: Init, _rpc_service: RpcService<()>) -> anyhow::Result<Self>
     where
@@ -116,19 +118,16 @@ impl Node<Payload, ()> for BroadcastNode {
             ..Default::default()
         }));
 
-        Ok(Self {
-            node_id: init.node_id.clone(),
-            state,
-        })
+        Ok(Self { state })
     }
 
     async fn heartbeat(&self, tx: UnboundedSender<Message<Payload>>) -> anyhow::Result<()> {
         let state = self.state.clone();
-        let mut rng = thread_rng();
         loop {
-            tokio::time::sleep(Duration::from_millis(150)).await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
             let mut s = state.lock().await;
             s.counter += 1;
+            let mut rng = thread_rng();
             let peer = s.peers.choose(&mut rng).unwrap();
             let message = Message {
                 id: Some(s.counter),
@@ -148,7 +147,7 @@ impl Node<Payload, ()> for BroadcastNode {
     }
 
     async fn step(
-        &mut self,
+        &self,
         input: Message<Payload>,
         tx: UnboundedSender<Message<Payload>>,
     ) -> anyhow::Result<()> {
@@ -174,7 +173,7 @@ impl Node<Payload, ()> for BroadcastNode {
             }
             Payload::Topology { mut topology } => {
                 tracing::info!("Got New Topology: {:?}", topology);
-                s.peers = topology.entry(self.node_id.clone()).or_default().clone();
+                s.peers = topology.entry(s.node_id.clone()).or_default().clone();
                 reply.body.payload = Payload::TopologyOk;
                 tx.send(reply)?;
             }

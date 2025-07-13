@@ -1,6 +1,9 @@
-use gossip::{Init, Message, Node, generate_snowflake_id, main_loop, RpcService};
+use async_trait::async_trait;
+use gossip::{Init, Message, Node, RpcService, generate_snowflake_id, main_loop};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::Mutex;
 use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -11,11 +14,16 @@ enum Payload {
     GenerateOk { id: u64 },
 }
 
+#[derive(Clone)]
 struct UniqueIdNode {
+    inter: Arc<Mutex<Inter>>,
+}
+struct Inter {
     node_id: usize,
     counter: usize,
 }
 
+#[async_trait]
 impl Node<Payload, ()> for UniqueIdNode {
     fn from_init(init: Init, _rpc_service: RpcService<()>) -> anyhow::Result<Self>
     where
@@ -27,25 +35,28 @@ impl Node<Payload, ()> for UniqueIdNode {
             .filter(|c| c.is_ascii_digit())
             .collect::<String>();
         Ok(Self {
-            node_id: node_id.parse::<usize>()?,
-            counter: 0,
+            inter: Arc::new(Mutex::new(Inter {
+                node_id: node_id.parse::<usize>()?,
+                counter: 0,
+            })),
         })
     }
 
     async fn step(
-        &mut self,
+        &self,
         input: Message<Payload>,
         tx: UnboundedSender<Message<Payload>>,
     ) -> anyhow::Result<()> {
-        self.counter += 1;
-        let mut reply = input.into_reply(Some(self.counter));
+        let mut inter = self.inter.lock().await;
+        inter.counter += 1;
+        let mut reply = input.into_reply(Some(inter.counter));
 
         match reply.body.payload {
             Payload::Generate => {
                 let id = generate_snowflake_id(
                     SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64,
-                    self.node_id as u64,
-                    self.counter as u64,
+                    inter.node_id as u64,
+                    inter.counter as u64,
                 );
                 reply.body.payload = Payload::GenerateOk { id };
                 tx.send(reply)?;

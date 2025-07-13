@@ -1,6 +1,8 @@
-use gossip::{Init, Message, Node, main_loop, RpcService};
+use async_trait::async_trait;
+use gossip::{Init, Message, Node, RpcService, main_loop};
 use serde::{Deserialize, Serialize};
-use std::fmt::{Display, Formatter};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -11,20 +13,24 @@ enum Payload {
     EchoOk { echo: String },
 }
 
+#[allow(dead_code)]
+#[derive(Clone)]
 pub struct EchoNode {
-    id: usize,
+    id: Arc<Mutex<String>>,
 }
 
+#[async_trait]
 impl Node<Payload, ()> for EchoNode {
-    fn from_init(_init: Init, _rpc_service: RpcService<()>) -> anyhow::Result<Self>
+    fn from_init(init: Init, _rpc_service: RpcService<()>) -> anyhow::Result<Self>
     where
         Self: Sized,
     {
-        Ok(Self { id: 1 })
+        let id = Arc::new(Mutex::new(init.node_id));
+        Ok(Self { id })
     }
 
     async fn step(
-        &mut self,
+        &self,
         input: Message<Payload>,
         tx: UnboundedSender<Message<Payload>>,
     ) -> anyhow::Result<()> {
@@ -39,12 +45,6 @@ impl Node<Payload, ()> for EchoNode {
             Payload::EchoOk { .. } => {}
         }
         Ok(())
-    }
-}
-
-impl Display for EchoNode {
-    fn fmt(&self, f: &mut Formatter) -> Result<(), std::fmt::Error> {
-        write!(f, "{}", self.id)
     }
 }
 

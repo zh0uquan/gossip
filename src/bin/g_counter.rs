@@ -1,4 +1,5 @@
-use gossip::{Body, Init, Message, Node, main_loop, RpcService};
+use async_trait::async_trait;
+use gossip::{Body, Init, Message, Node, RpcService, main_loop};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,25 +23,29 @@ enum Payload {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct State {
+    node_id: NodeId,
+    node_ids: Vec<NodeId>,
     counter: usize,
     g_vec: HashMap<NodeId, Vec<Value>>,
 }
 
+#[derive(Clone)]
 pub struct GCounterNode {
-    node_id: String,
-    node_ids: Vec<String>,
     state: Arc<Mutex<State>>,
 }
 
+#[async_trait]
 impl Node<Payload, ()> for GCounterNode {
     fn from_init(init: Init, _rpc_service: RpcService<()>) -> anyhow::Result<Self>
     where
         Self: Sized,
     {
         Ok(Self {
-            node_id: init.node_id,
-            node_ids: init.node_ids,
-            state: Default::default(),
+            state: Arc::new(Mutex::new(State {
+                node_id: init.node_id,
+                node_ids: init.node_ids,
+                ..Default::default()
+            })),
         })
     }
 
@@ -50,10 +55,10 @@ impl Node<Payload, ()> for GCounterNode {
             let mut s = self.state.lock().await;
             s.counter += 1;
 
-            for peer in self.node_ids.iter() {
+            for peer in s.node_ids.iter() {
                 let message = Message {
                     id: Some(s.counter),
-                    src: self.node_id.clone(),
+                    src: s.node_id.clone(),
                     dest: peer.clone(),
                     body: Body {
                         id: None,
@@ -70,17 +75,18 @@ impl Node<Payload, ()> for GCounterNode {
     }
 
     async fn step(
-        &mut self,
+        &self,
         input: Message<Payload>,
         tx: UnboundedSender<Message<Payload>>,
     ) -> anyhow::Result<()> {
         let mut s = self.state.lock().await;
+        let node_id = s.node_id.clone();
         let mut reply = input.into_reply(Some(0));
         match reply.body.payload {
             Payload::Add { delta } => {
                 tracing::info!("Got new message: {:?}", delta);
                 reply.body.payload = Payload::AddOk;
-                s.g_vec.entry(self.node_id.clone()).or_default().push(delta);
+                s.g_vec.entry(node_id).or_default().push(delta);
                 tx.send(reply)?;
             }
             Payload::Replicate { values: incoming } => {
